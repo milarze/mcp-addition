@@ -1,81 +1,12 @@
 use anyhow::Result;
-use rmcp::{
-    ErrorData as McpError,
-    ServerHandler,
-    ServiceExt,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::*,
-    tool,
-    tool_handler,
-    tool_router,
-    transport,
-};
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use rmcp::{ServiceExt, transport};
 use tracing_subscriber::{self, EnvFilter};
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct AddArgs {
-    pub a: f64,
-    pub b: f64,
-}
+mod http;
+mod oauth;
+mod server;
 
-#[derive(Clone)]
-pub struct AdditionServer {
-    tool_router: ToolRouter<AdditionServer>,
-}
-
-impl AdditionServer {
-    pub fn new() -> Self {
-        Self {
-            tool_router: Self::tool_router(),
-        }
-    }
-}
-
-#[tool_router]
-impl AdditionServer {
-    #[tool(name = "add", description = "Add two numbers together")]
-    async fn add(
-        &self,
-        Parameters(args): Parameters<AddArgs>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = args.a + args.b;
-        tracing::info!("Adding {} + {} = {}", args.a, args.b, result);
-
-        Ok(CallToolResult {
-            content: vec![Content::text(serde_json::json!({
-                "result": result
-            }).to_string())],
-            is_error: Some(false),
-            meta: None,
-            structured_content: None,
-        })
-    }
-}
-
-#[tool_handler]
-impl ServerHandler for AdditionServer {
-    fn get_info(&self) -> InitializeResult {
-        InitializeResult {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities {
-                tools: Some(ToolsCapability {
-                    list_changed: Some(false),
-                }),
-                ..Default::default()
-            },
-            server_info: Implementation {
-                name: "mcp-addition".to_string(),
-                version: "0.1.0".to_string(),
-                icons: None,
-                title: None,
-                website_url: None,
-            },
-            instructions: Some("An MCP server that provides addition functionality".to_string()),
-        }
-    }
-}
+use server::AdditionServer;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -84,12 +15,31 @@ async fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env().add_directive("info".parse()?))
         .init();
 
-    tracing::info!("Starting MCP Addition Server");
+    let transport_kind = std::env::var("MCP_TRANSPORT").unwrap_or_else(|_| "stdio".to_string());
 
-    let server = AdditionServer::new();
-    let service = server.serve(transport::stdio()).await?;
-
-    service.waiting().await?;
+    match transport_kind.as_str() {
+        "http" => {
+            let bind = std::env::var("MCP_BIND_ADDR")
+                .unwrap_or_else(|_| "127.0.0.1:8000".to_string());
+            let addr = bind.parse()?;
+            let issuer = std::env::var("MCP_ISSUER")
+                .unwrap_or_else(|_| format!("http://{}", bind));
+            tracing::info!("Starting MCP Addition Server (streamable HTTP + OAuth)");
+            http::serve(addr, issuer).await?;
+        }
+        "stdio" | "" => {
+            tracing::info!("Starting MCP Addition Server (stdio)");
+            let server = AdditionServer::new();
+            let service = server.serve(transport::stdio()).await?;
+            service.waiting().await?;
+        }
+        other => {
+            anyhow::bail!(
+                "Unknown MCP_TRANSPORT={}; expected \"stdio\" or \"http\"",
+                other
+            );
+        }
+    }
 
     Ok(())
 }
